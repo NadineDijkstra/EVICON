@@ -1,0 +1,128 @@
+function DecodingSearchlightPermutation(cfg)
+% function DecodingSearchlightPermutation(cfg)
+
+% get the mask % searchlights indices
+load(fullfile(cfg.root,cfg.mask),'mask','vind','mind'); 
+V = read_nii('Results\general_mask.nii');
+
+% loop over subjects
+for sub = 1:length(cfg.subjects)
+    
+    fprintf('PROCESSING SUBJECT %s (%d/%d) \n',cfg.subjects{sub},sub,length(cfg.subjects))
+    
+    % set random generator for repeatability
+    rng(1,'twister')
+        
+    
+    %% Get the data
+    outputDir = fullfile(cfg.root,'Results', cfg.subjects{sub});
+    if ~exist(fullfile(outputDir,sprintf('Perm_%s.mat',cfg.outputName)),'file')
+        
+        load(fullfile(outputDir,'PrepData'));
+        
+        % select trials
+        class1_idx = find(eval(cfg.conIdx{1}));
+        class2_idx = find(eval(cfg.conIdx{2}));
+        class_idx  = [class1_idx; class2_idx];
+        
+        confidence = confidence(class_idx);
+        data       = data(class_idx,:);
+        detection  = detection(class_idx);
+        response   = response(class_idx,:);
+        run_idx    = run_idx(class_idx);
+        stimulus   = stimulus(class_idx);
+        
+        labels     = eval(cfg.conIdx{2})+1;
+        
+        % Balance the trials per run
+        nRuns = length(unique(run_idx));
+        idx = cell(nRuns,1); trl_ind = [];
+        for r = 1:nRuns
+            ind = find(run_idx == r);
+            idx{r} = balance_trials(labels(ind,1),'downsample');
+            
+            trl_ind = [trl_ind; ind(cell2mat(idx{r}))];
+        end
+        
+        confidence = confidence(trl_ind);
+        data       = data(trl_ind,:);
+        detection  = detection(trl_ind);
+        response   = response(trl_ind,:);
+        run_idx    = run_idx(trl_ind);
+        stimulus   = stimulus(trl_ind);
+        
+        Y          = eval(cfg.conIdx{1});
+        nTrials    = length(Y);
+        
+        % zscore per run
+        for r = 1:nRuns
+            data(run_idx==r,:) = zscore(data(run_idx==r,:),[],1);
+        end
+        
+        %% Do decoding per searchlight
+        % decoding settings
+        cfgD.gamma = cfg.gamma;
+        ind        = find(mask);
+        
+        nSearchlights = length(vind);
+        accuracy = zeros([cfg.nPerm size(data,2)]);
+        
+        % create folds - leave one run out
+        folds = cell(nRuns,1);
+        for r = 1:nRuns
+            folds{r} = find(run_idx==r);
+        end
+        nFolds = length(folds);
+        
+        % run over permutations
+        for per = 1:cfg.nPerm
+            
+            fprintf('Permutation %d out of %d \n',per,cfg.nPerm)
+            
+            % permute labels per run
+            Yper = Y;
+            for r = 1:nRuns
+                idx = folds{r};
+                Yper(idx) = Y(idx(randperm(length(idx))));
+            end            
+            
+            % run over searchlights
+            for s = 1:nSearchlights
+                
+                Yhat = zeros(length(Yper),1);
+                
+                if s >= (nSearchlights/4) && mod(s,round((nSearchlights/4))) == 0
+                    fprintf('\t Progress: %d percent of searchlights \n',round((s/nSearchlights)*100))
+                end
+                
+                % mask the betas
+                x = data(:,mind{s}); % use mask indices to get data here
+                
+                % decoding
+                for f = 1:nFolds
+                    testidx = folds{f}; trainidx = setdiff(1:nTrials,testidx);
+                    labels = Yper(trainidx); trainX = x(trainidx,:); testX = x(testidx,:);
+                    
+                    % train
+                    decoder = train_LDA(cfgD,labels,trainX');
+                    
+                    % decode
+                    Yhat(testidx) = decode_LDA(cfgD,decoder,testX');
+                end
+                
+                % determine accuracy
+                accuracy(per,mind{s}) = mean(Yhat > 0 == Yper);
+                clear x
+                
+            end
+        end
+    
+    % write results
+    save(fullfile(outputDir,sprintf('Perm_%s.mat',cfg.outputName)),...
+        'accuracy','-v7.3');    
+    clear accuracy data confidence Yhat stimulus response detection run_idx
+    else
+        warning('Already processed this subject, skipping for now...')
+    end
+    
+end
